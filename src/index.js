@@ -1,26 +1,48 @@
 require('dotenv').config()
 
-const ccxt = require('ccxt')
-const { RSI, EMA } = require('technicalindicators')
-const Database = require('better-sqlite3')
+const ccxt                 = require('ccxt')
+const { RSI }              = require('technicalindicators')
+const Database             = require('better-sqlite3')
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
 const CONFIG = {
-  symbol: 'ETH/USDT',
-  timeframe: '15m',
+  symbol:    'ETH/USDT',
+  timeframe: '15m',          // ganti ke '1h', '4h' dll tanpa ubah logic
 
-  maxPositionUSDT: 500,  // maksimal modal per trade (spot, hard cap)
+  maxPositionUSDT: 200,      // modal per trade (hard cap)
 
-  rsiPeriod: 14,
-  rsiBuyBelow: 35,       // entry signal
-  emaPeriod: 200,        // trend filter: hanya buy kalau harga > EMA 200
+  // RSI
+  rsiPeriod:   14,
+  rsiBuyBelow: 30,           // entry hanya kalau RSI < 30
 
-  slPercent: 0.02,       // Stop Loss  2% di bawah entry
-  tpPercent: 0.04,       // Take Profit 4% di atas entry
+  // Bollinger Band
+  bbPeriod:   20,            // periode MA (juga dipakai sebagai TP target = MA20)
+  bbStdDev:   2,             // standar deviasi
+
+  // Exit
+  slPercent: 0.012,          // Stop Loss 1.2% di bawah entry
+  // TP = harga menyentuh MA20 (garis tengah Bollinger), dihitung dinamis per tick
 
   circuitBreaker: {
-    maxSLPerDay: 2,      // berhenti trading hari ini setelah SL kena X kali
+    maxSLPerDay: 2,          // berhenti trading hari ini setelah SL kena X kali
   },
+}
+
+// ─── BOLLINGER BAND HELPER ────────────────────────────────────────────────────
+// Hitung MA dan StdDev dari array closes
+function calcBB(closes, period, stdDevMult) {
+  if (closes.length < period) return null
+
+  const slice = closes.slice(-period)
+  const ma    = slice.reduce((a, b) => a + b, 0) / period
+  const variance = slice.reduce((acc, v) => acc + Math.pow(v - ma, 2), 0) / period
+  const stdDev   = Math.sqrt(variance)
+
+  return {
+    upper: ma + stdDevMult * stdDev,
+    middle: ma,                          // MA20 = target TP
+    lower:  ma - stdDevMult * stdDev,
+  }
 }
 
 // ─── DATABASE ──────────────────────────────────────────────────────────────────
@@ -59,7 +81,6 @@ const stmtCloseWithReason = db.prepare(`
   WHERE id = @id
 `)
 
-// Hitung SL yang kena hari ini (untuk circuit breaker)
 const stmtSLToday = db.prepare(`
   SELECT COUNT(*) as count FROM positions
   WHERE symbol = ?
@@ -86,92 +107,99 @@ function isCircuitBreakerActive(symbol) {
 }
 
 // ─── SIGNAL ────────────────────────────────────────────────────────────────────
-// function getSignal({ rsi, price, ema200 }) {
-//   const uptrend  = price > ema200
-//   const oversold = rsi < CONFIG.rsiBuyBelow
+//
+// Rules entry yang disepakati:
+//   1. Candle [N-1] close DI BAWAH lower Bollinger Band
+//   2. Candle [N]   close DI ATAS  lower Bollinger Band (balik masuk)
+//   3. RSI [N] < 30
+//
+// Entry dieksekusi di awal candle [N+1]
+//
+function getSignal({ closes, rsiArr, bbArr }) {
+  // Butuh minimal 2 candle terakhir dan BB yang valid
+  if (closes.length < 2 || bbArr.length < 2) return 'NONE'
 
-//   console.log(`[FILTER] RSI=${rsi.toFixed(2)} oversold=${oversold} | EMA200=${ema200.toFixed(2)} uptrend=${uptrend}`)
+  const prevClose = closes[closes.length - 2]
+  const currClose = closes[closes.length - 1]
 
-//   if (oversold && uptrend) return 'BUY'
-//   return 'NONE'
-// }
+  const prevBB = bbArr[bbArr.length - 2]
+  const currBB = bbArr[bbArr.length - 1]
 
-function getSignal({ rsi, price, ema200 }) {
-  if (rsi < CONFIG.rsiBuyBelow) return 'BUY'
+  const rsi = rsiArr[rsiArr.length - 1]
+
+  // Kondisi Bollinger Band: candle sebelumnya di bawah lower, sekarang balik masuk
+  const prevBelowLower = prevClose < prevBB.lower
+  const currAboveLower = currClose > currBB.lower
+  const bbBounce       = prevBelowLower && currAboveLower
+
+  // Kondisi RSI
+  const oversold = rsi < CONFIG.rsiBuyBelow
+
+  console.log(`[SIGNAL CHECK]`)
+  console.log(`  Prev close=${prevClose.toFixed(2)} | Prev lower BB=${prevBB.lower.toFixed(2)} | Below? ${prevBelowLower}`)
+  console.log(`  Curr close=${currClose.toFixed(2)} | Curr lower BB=${currBB.lower.toFixed(2)} | Above? ${currAboveLower}`)
+  console.log(`  BB Bounce=${bbBounce} | RSI=${rsi.toFixed(2)} | Oversold=${oversold}`)
+
+  if (bbBounce && oversold) return 'BUY'
   return 'NONE'
 }
 
 // ─── POSITION SIZE ─────────────────────────────────────────────────────────────
-// Pakai 100% balance, tapi maksimal $500 (buat testing/saldo kecil)
 function getPositionSize(usdtBalance, price) {
   const capUsdt = Math.min(usdtBalance, CONFIG.maxPositionUSDT)
   const size    = capUsdt / price
-  console.log(`[SIZE] Balance=$${usdtBalance.toFixed(2)}, Dipakai=$${capUsdt.toFixed(2)}, Size=${size.toFixed(6)} BTC`)
+  console.log(`[SIZE] Balance=$${usdtBalance.toFixed(2)}, Dipakai=$${capUsdt.toFixed(2)}, Size=${size.toFixed(6)} ETH`)
   return size
 }
 
 // ─── SL / TP ───────────────────────────────────────────────────────────────────
-function calcSLTP(entryPrice) {
+// SL: fixed 1.2% di bawah entry
+// TP: MA20 saat ini (garis tengah Bollinger) — dinamis, dihitung dari data terbaru
+function calcSLTP(entryPrice, ma20) {
   return {
     sl: entryPrice * (1 - CONFIG.slPercent),
-    tp: entryPrice * (1 + CONFIG.tpPercent),
+    tp: ma20,   // target TP = garis tengah Bollinger saat entry
   }
 }
 
 // ─── ORDER HELPERS ─────────────────────────────────────────────────────────────
 async function placeBuy(symbol, size) {
-  console.log(`[BUY] Market buy ${size} ${symbol}`)
+  console.log(`[BUY] Market buy ${size.toFixed(6)} ${symbol}`)
   return await exchange.createMarketBuyOrder(symbol, size)
 }
 
-// OKX klasik: pakai algo order (trigger order) untuk SL & TP
-// SL: trigger saat harga turun ke slPrice, eksekusi market sell
 async function placeSL(symbol, size, slPrice) {
   console.log(`[SL ] Pasang algo SL @ ${slPrice.toFixed(2)}`)
   return await exchange.createOrder(symbol, 'market', 'sell', size, undefined, {
-    triggerPrice: slPrice,
+    triggerPrice:     slPrice,
     triggerPriceType: 'last',
-    orderType: 'trigger',         // OKX algo order
+    orderType:        'trigger',
   })
 }
 
-// TP: trigger saat harga naik ke tpPrice, eksekusi market sell
 async function placeTP(symbol, size, tpPrice) {
   console.log(`[TP ] Pasang algo TP @ ${tpPrice.toFixed(2)}`)
   return await exchange.createOrder(symbol, 'market', 'sell', size, undefined, {
-    triggerPrice: tpPrice,
+    triggerPrice:     tpPrice,
     triggerPriceType: 'last',
-    orderType: 'trigger',         // OKX algo order
+    orderType:        'trigger',
   })
 }
 
-async function cancelOrder(symbol, orderId) {
-  try {
-    await exchange.cancelOrder(orderId, symbol)
-    console.log(`[CANCEL] Order ${orderId} dibatalkan`)
-  } catch (e) {
-    // Order mungkin sudah terisi atau sudah dicancel — aman diabaikan
-    console.warn(`[WARN] Gagal cancel order ${orderId}:`, e.message)
-  }
-}
-
-// ─── CEK POSISI TERTUTUP (OCO) ────────────────────────────────────────────────
-// Algo order OKX harus di-fetch via fetchAlgoOrders, bukan fetchOrder biasa
+// ─── CEK STATUS ALGO ORDER ────────────────────────────────────────────────────
 async function fetchAlgoOrderStatus(symbol, algoOrderId) {
   try {
-    // Cek di open algo orders dulu
     const openAlgos = await exchange.fetchOpenOrders(symbol, undefined, undefined, {
       ordType: 'trigger',
     })
     const found = openAlgos.find(o => o.id === algoOrderId)
-    if (found) return found.status  // 'open' = belum kena
+    if (found) return found.status
 
-    // Tidak ada di open → cek di history algo orders
     const historyAlgos = await exchange.fetchCanceledAndClosedOrders(symbol, undefined, undefined, undefined, {
       ordType: 'trigger',
     })
     const hist = historyAlgos.find(o => o.id === algoOrderId)
-    if (hist) return hist.status    // 'closed' = sudah ter-trigger, 'canceled' = dicancel
+    if (hist) return hist.status
 
     return 'unknown'
   } catch (e) {
@@ -189,9 +217,8 @@ async function cancelAlgoOrder(symbol, algoOrderId) {
   }
 }
 
-// Kalau SL kena → cancel TP, dan sebaliknya
+// Cek apakah SL atau TP sudah kena, lalu tutup posisi dan cancel order yang tersisa
 async function checkIfClosed(position) {
-  // Cek SL
   if (position.sl_order_id) {
     const status = await fetchAlgoOrderStatus(position.symbol, position.sl_order_id)
     if (status === 'closed') {
@@ -202,7 +229,6 @@ async function checkIfClosed(position) {
     }
   }
 
-  // Cek TP
   if (position.tp_order_id) {
     const status = await fetchAlgoOrderStatus(position.symbol, position.tp_order_id)
     if (status === 'closed') {
@@ -226,7 +252,7 @@ async function runBot() {
     console.log('\n─────────────────────────────────────────')
     console.log(`[${new Date().toISOString()}] Tick ${CONFIG.symbol}`)
 
-    // 1. Circuit breaker — cek paling awal
+    // 1. Circuit breaker
     if (isCircuitBreakerActive(CONFIG.symbol)) return
 
     // 2. Cek posisi aktif
@@ -238,42 +264,63 @@ async function runBot() {
         console.log('[SKIP] Posisi masih open, tidak entry baru')
         return
       }
-      // Setelah posisi tutup karena SL, cek circuit breaker lagi
       if (isCircuitBreakerActive(CONFIG.symbol)) return
     }
 
-    // 3. Ambil data market (250 candle untuk EMA 200)
+    // 3. Ambil data market
+    // Butuh minimal bbPeriod + 2 candle untuk kalkulasi BB yang valid
+    const candleLimit = CONFIG.bbPeriod + 50
+    const candles     = await exchange.fetchOHLCV(CONFIG.symbol, CONFIG.timeframe, undefined, candleLimit)
+    const closes      = candles.map(c => c[4])
+
+    // 4. Hitung indikator
+    const rsiArr = RSI.calculate({ values: closes, period: CONFIG.rsiPeriod })
+
+    // Hitung BB untuk setiap candle secara sliding window
+    const bbArr = []
+    for (let i = CONFIG.bbPeriod - 1; i < closes.length; i++) {
+      const slice = closes.slice(i - CONFIG.bbPeriod + 1, i + 1)
+      const ma    = slice.reduce((a, b) => a + b, 0) / CONFIG.bbPeriod
+      const variance = slice.reduce((acc, v) => acc + Math.pow(v - ma, 2), 0) / CONFIG.bbPeriod
+      const stdDev   = Math.sqrt(variance)
+      bbArr.push({
+        upper:  ma + CONFIG.bbStdDev * stdDev,
+        middle: ma,
+        lower:  ma - CONFIG.bbStdDev * stdDev,
+      })
+    }
+
+    const currBB    = bbArr[bbArr.length - 1]
+    const currRSI   = rsiArr[rsiArr.length - 1]
+    const currPrice = closes[closes.length - 1]
+
     const balance = await exchange.fetchBalance()
     const usdt    = balance.USDT.free
 
-    const candles = await exchange.fetchOHLCV(CONFIG.symbol, CONFIG.timeframe, undefined, 250)
-    const closes  = candles.map(c => c[4])
+    console.log(`[DATA] Price=${currPrice.toFixed(2)} | RSI=${currRSI.toFixed(2)} | BB Lower=${currBB.lower.toFixed(2)} | BB Mid=${currBB.middle.toFixed(2)} | USDT=$${usdt.toFixed(2)}`)
 
-    const rsiArr = RSI.calculate({ values: closes, period: CONFIG.rsiPeriod })
-    const emaArr = EMA.calculate({ values: closes, period: CONFIG.emaPeriod })
-
-    const rsi    = rsiArr[rsiArr.length - 1]
-    const ema200 = emaArr[emaArr.length - 1]
-    const price  = closes[closes.length - 1]
-
-    console.log(`[DATA] Price=${price}  RSI=${rsi.toFixed(2)}  EMA200=${ema200.toFixed(2)}  USDT=$${usdt.toFixed(2)}`)
-
-    // 4. Sinyal
-    const signal = getSignal({ rsi, price, ema200 })
+    // 5. Cek sinyal
+    const signal = getSignal({ closes, rsiArr, bbArr })
     console.log(`[SIGNAL] ${signal}`)
     if (signal !== 'BUY') return
 
-    // 5. Hitung size
-    const size       = getPositionSize(usdt, price)
-    const { sl, tp } = calcSLTP(price)
+    // 6. Hitung size & SL/TP
+    const size       = getPositionSize(usdt, currPrice)
+    const { sl, tp } = calcSLTP(currPrice, currBB.middle)
 
-    console.log(`[ORDER] SL=${sl.toFixed(2)}, TP=${tp.toFixed(2)}`)
+    // Validasi: TP harus di atas entry (jangan entry kalau MA20 di bawah harga)
+    if (tp <= currPrice) {
+      console.log(`[SKIP] TP (MA20=${tp.toFixed(2)}) <= entry price — sinyal tidak valid`)
+      return
+    }
 
-    // 6. Entry
+    console.log(`[ORDER] Entry=${currPrice.toFixed(2)}, SL=${sl.toFixed(2)}, TP=${tp.toFixed(2)}`)
+
+    // 7. Entry
     const buyOrder   = await placeBuy(CONFIG.symbol, size)
-    const entryPrice = buyOrder.average ?? price
+    const entryPrice = buyOrder.average ?? currPrice
 
-    // 7. Tunggu 2 detik supaya balance ETH settle dulu di exchange
+    // Tunggu balance settle
     await new Promise(r => setTimeout(r, 2000))
 
     // 8. Pasang SL & TP
@@ -315,9 +362,15 @@ async function runBot() {
 
 // ─── START ────────────────────────────────────────────────────────────────────
 console.log('=== OKX Bot Started ===')
-console.log(`Symbol : ${CONFIG.symbol}`)
-console.log(`Max    : $${CONFIG.maxPositionUSDT} per trade`)
-console.log(`SL/TP  : ${CONFIG.slPercent * 100}% / ${CONFIG.tpPercent * 100}%`)
-console.log(`CB     : stop setelah SL ${CONFIG.circuitBreaker.maxSLPerDay}x hari ini`)
+console.log(`Symbol    : ${CONFIG.symbol}`)
+console.log(`Timeframe : ${CONFIG.timeframe}`)
+console.log(`Max Modal : $${CONFIG.maxPositionUSDT} per trade`)
+console.log(`RSI Buy   : < ${CONFIG.rsiBuyBelow}`)
+console.log(`BB Period : ${CONFIG.bbPeriod}`)
+console.log(`SL        : ${CONFIG.slPercent * 100}%`)
+console.log(`TP        : MA20 (garis tengah Bollinger)`)
+console.log(`CB        : stop setelah SL ${CONFIG.circuitBreaker.maxSLPerDay}x hari ini`)
+console.log(`Interval  : 5 menit`)
+
 runBot()
-setInterval(runBot, 15_000)
+setInterval(runBot, 5 * 60 * 1000) // cek setiap 5 menit
