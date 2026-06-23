@@ -6,6 +6,8 @@ const Database             = require('better-sqlite3')
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
 const CONFIG = {
+  exchange:  'tokocrypto',          // 'okx' atau 'tokocrypto' — tinggal ganti ini
+
   symbol:    'ETH/USDT',
   timeframe: '15m',          // ganti ke '1h', '4h' dll tanpa ubah logic
 
@@ -28,22 +30,30 @@ const CONFIG = {
   },
 }
 
-// ─── BOLLINGER BAND HELPER ────────────────────────────────────────────────────
-// Hitung MA dan StdDev dari array closes
-function calcBB(closes, period, stdDevMult) {
-  if (closes.length < period) return null
-
-  const slice = closes.slice(-period)
-  const ma    = slice.reduce((a, b) => a + b, 0) / period
-  const variance = slice.reduce((acc, v) => acc + Math.pow(v - ma, 2), 0) / period
-  const stdDev   = Math.sqrt(variance)
-
-  return {
-    upper: ma + stdDevMult * stdDev,
-    middle: ma,                          // MA20 = target TP
-    lower:  ma - stdDevMult * stdDev,
+// ─── EXCHANGE SELECTION ────────────────────────────────────────────────────────
+// Dibangun otomatis berdasarkan CONFIG.exchange. Tinggal ganti CONFIG.exchange
+// di atas — tidak perlu comment/uncomment kode lagi.
+function buildExchange(name) {
+  if (name === 'okx') {
+    return new ccxt.okx({
+      apiKey:   process.env.OKX_API_KEY,
+      secret:   process.env.OKX_SECRET,
+      password: process.env.OKX_PASSPHRASE,
+    })
   }
+
+  if (name === 'tokocrypto') {
+    return new ccxt.tokocrypto({
+      apiKey: process.env.TKO_API_KEY,
+      secret: process.env.TKO_SECRET,
+    })
+  }
+
+  throw new Error(`CONFIG.exchange '${name}' tidak dikenali. Pakai 'okx' atau 'tokocrypto'.`)
 }
+
+const exchange     = buildExchange(CONFIG.exchange)
+const EXCHANGE_NAME = CONFIG.exchange
 
 // ─── DATABASE ──────────────────────────────────────────────────────────────────
 const db = new Database('positions.db')
@@ -89,13 +99,6 @@ const stmtSLToday = db.prepare(`
     AND DATE(closed_at) = DATE('now')
 `)
 
-// ─── EXCHANGE ──────────────────────────────────────────────────────────────────
-const exchange = new ccxt.okx({
-  apiKey:   process.env.OKX_API_KEY,
-  secret:   process.env.OKX_SECRET,
-  password: process.env.OKX_PASSPHRASE,
-})
-
 // ─── CIRCUIT BREAKER ───────────────────────────────────────────────────────────
 function isCircuitBreakerActive(symbol) {
   const { count } = stmtSLToday.get(symbol)
@@ -108,15 +111,12 @@ function isCircuitBreakerActive(symbol) {
 
 // ─── SIGNAL ────────────────────────────────────────────────────────────────────
 //
-// Rules entry yang disepakati:
+// Rules entry:
 //   1. Candle [N-1] close DI BAWAH lower Bollinger Band
 //   2. Candle [N]   close DI ATAS  lower Bollinger Band (balik masuk)
 //   3. RSI [N] < 30
 //
-// Entry dieksekusi di awal candle [N+1]
-//
 function getSignal({ closes, rsiArr, bbArr }) {
-  // Butuh minimal 2 candle terakhir dan BB yang valid
   if (closes.length < 2 || bbArr.length < 2) return 'NONE'
 
   const prevClose = closes[closes.length - 2]
@@ -127,12 +127,10 @@ function getSignal({ closes, rsiArr, bbArr }) {
 
   const rsi = rsiArr[rsiArr.length - 1]
 
-  // Kondisi Bollinger Band: candle sebelumnya di bawah lower, sekarang balik masuk
   const prevBelowLower = prevClose < prevBB.lower
   const currAboveLower = currClose > currBB.lower
   const bbBounce       = prevBelowLower && currAboveLower
 
-  // Kondisi RSI
   const oversold = rsi < CONFIG.rsiBuyBelow
 
   console.log(`[SIGNAL CHECK]`)
@@ -153,8 +151,6 @@ function getPositionSize(usdtBalance, price) {
 }
 
 // ─── SL / TP ───────────────────────────────────────────────────────────────────
-// SL: fixed 1.2% di bawah entry
-// TP: MA20 saat ini (garis tengah Bollinger) — dinamis, dihitung dari data terbaru
 function calcSLTP(entryPrice, ma20) {
   return {
     sl: entryPrice * (1 - CONFIG.slPercent),
@@ -162,79 +158,120 @@ function calcSLTP(entryPrice, ma20) {
   }
 }
 
-// ─── ORDER HELPERS ─────────────────────────────────────────────────────────────
+// ─── ORDER HELPERS (exchange-aware) ────────────────────────────────────────────
 async function placeBuy(symbol, size) {
   console.log(`[BUY] Market buy ${size.toFixed(6)} ${symbol}`)
   return await exchange.createMarketBuyOrder(symbol, size)
 }
 
+// OKX: pakai algo/trigger order. Tokocrypto (gaya Binance): pakai STOP_LOSS_LIMIT.
 async function placeSL(symbol, size, slPrice) {
-  console.log(`[SL ] Pasang algo SL @ ${slPrice.toFixed(2)}`)
-  return await exchange.createOrder(symbol, 'market', 'sell', size, undefined, {
-    triggerPrice:     slPrice,
-    triggerPriceType: 'last',
-    orderType:        'trigger',
-  })
+  if (EXCHANGE_NAME === 'okx') {
+    console.log(`[SL ] Pasang algo SL (OKX) @ ${slPrice.toFixed(2)}`)
+    return await exchange.createOrder(symbol, 'market', 'sell', size, undefined, {
+      triggerPrice:     slPrice,
+      triggerPriceType: 'last',
+      orderType:        'trigger',
+    })
+  }
+
+  if (EXCHANGE_NAME === 'tokocrypto') {
+    console.log(`[SL ] Pasang STOP_LOSS_LIMIT (Tokocrypto) @ ${slPrice.toFixed(2)}`)
+    return await exchange.createOrder(symbol, 'STOP_LOSS_LIMIT', 'sell', size, slPrice, {
+      stopPrice: slPrice,
+    })
+  }
+
+  throw new Error(`Exchange ${EXCHANGE_NAME} belum di-handle di placeSL`)
 }
 
 async function placeTP(symbol, size, tpPrice) {
-  console.log(`[TP ] Pasang algo TP @ ${tpPrice.toFixed(2)}`)
-  return await exchange.createOrder(symbol, 'market', 'sell', size, undefined, {
-    triggerPrice:     tpPrice,
-    triggerPriceType: 'last',
-    orderType:        'trigger',
-  })
+  if (EXCHANGE_NAME === 'okx') {
+    console.log(`[TP ] Pasang algo TP (OKX) @ ${tpPrice.toFixed(2)}`)
+    return await exchange.createOrder(symbol, 'market', 'sell', size, undefined, {
+      triggerPrice:     tpPrice,
+      triggerPriceType: 'last',
+      orderType:        'trigger',
+    })
+  }
+
+  if (EXCHANGE_NAME === 'tokocrypto') {
+    console.log(`[TP ] Pasang TAKE_PROFIT_LIMIT (Tokocrypto) @ ${tpPrice.toFixed(2)}`)
+    return await exchange.createOrder(symbol, 'TAKE_PROFIT_LIMIT', 'sell', size, tpPrice, {
+      stopPrice: tpPrice,
+    })
+  }
+
+  throw new Error(`Exchange ${EXCHANGE_NAME} belum di-handle di placeTP`)
 }
 
-// ─── CEK STATUS ALGO ORDER ────────────────────────────────────────────────────
-async function fetchAlgoOrderStatus(symbol, algoOrderId) {
+// Cek status order, dengan cara yang sesuai exchange aktif
+async function checkOrderStatus(symbol, orderId) {
+  if (EXCHANGE_NAME === 'okx') {
+    // OKX algo order tidak bisa fetchOrder biasa — harus cek open lalu history
+    try {
+      const openAlgos = await exchange.fetchOpenOrders(symbol, undefined, undefined, {
+        ordType: 'trigger',
+      })
+      const found = openAlgos.find(o => o.id === orderId)
+      if (found) return found.status
+
+      const historyAlgos = await exchange.fetchCanceledAndClosedOrders(symbol, undefined, undefined, undefined, {
+        ordType: 'trigger',
+      })
+      const hist = historyAlgos.find(o => o.id === orderId)
+      if (hist) return hist.status
+
+      return 'unknown'
+    } catch (e) {
+      console.warn(`[WARN] Gagal fetch algo order ${orderId}:`, e.message)
+      return 'unknown'
+    }
+  }
+
+  // Tokocrypto (gaya Binance): fetchOrder biasa sudah cukup
   try {
-    const openAlgos = await exchange.fetchOpenOrders(symbol, undefined, undefined, {
-      ordType: 'trigger',
-    })
-    const found = openAlgos.find(o => o.id === algoOrderId)
-    if (found) return found.status
-
-    const historyAlgos = await exchange.fetchCanceledAndClosedOrders(symbol, undefined, undefined, undefined, {
-      ordType: 'trigger',
-    })
-    const hist = historyAlgos.find(o => o.id === algoOrderId)
-    if (hist) return hist.status
-
-    return 'unknown'
+    const order = await exchange.fetchOrder(orderId, symbol)
+    return order.status
   } catch (e) {
-    console.warn(`[WARN] Gagal fetch algo order ${algoOrderId}:`, e.message)
+    console.warn(`[WARN] Gagal fetch order ${orderId}:`, e.message)
     return 'unknown'
   }
 }
 
-async function cancelAlgoOrder(symbol, algoOrderId) {
+// Cancel order, dengan cara yang sesuai exchange aktif
+async function cancelOrderUnified(symbol, orderId) {
   try {
-    await exchange.cancelOrder(algoOrderId, symbol, { ordType: 'trigger' })
-    console.log(`[CANCEL] Algo order ${algoOrderId} dibatalkan`)
+    if (EXCHANGE_NAME === 'okx') {
+      await exchange.cancelOrder(orderId, symbol, { ordType: 'trigger' })
+    } else {
+      await exchange.cancelOrder(orderId, symbol)
+    }
+    console.log(`[CANCEL] Order ${orderId} dibatalkan`)
   } catch (e) {
-    console.warn(`[WARN] Gagal cancel algo order ${algoOrderId}:`, e.message)
+    // Order mungkin sudah terisi/tercancel — aman diabaikan
+    console.warn(`[WARN] Gagal cancel order ${orderId}:`, e.message)
   }
 }
 
-// Cek apakah SL atau TP sudah kena, lalu tutup posisi dan cancel order yang tersisa
+// ─── CEK POSISI TERTUTUP (OCO) ────────────────────────────────────────────────
 async function checkIfClosed(position) {
   if (position.sl_order_id) {
-    const status = await fetchAlgoOrderStatus(position.symbol, position.sl_order_id)
+    const status = await checkOrderStatus(position.symbol, position.sl_order_id)
     if (status === 'closed') {
       console.log(`[CLOSED] SL hit — posisi #${position.id}`)
       stmtCloseWithReason.run({ id: position.id, reason: 'sl' })
-      if (position.tp_order_id) await cancelAlgoOrder(position.symbol, position.tp_order_id)
+      if (position.tp_order_id) await cancelOrderUnified(position.symbol, position.tp_order_id)
       return true
     }
   }
 
   if (position.tp_order_id) {
-    const status = await fetchAlgoOrderStatus(position.symbol, position.tp_order_id)
+    const status = await checkOrderStatus(position.symbol, position.tp_order_id)
     if (status === 'closed') {
       console.log(`[CLOSED] TP hit — posisi #${position.id}`)
       stmtCloseWithReason.run({ id: position.id, reason: 'tp' })
-      if (position.sl_order_id) await cancelAlgoOrder(position.symbol, position.sl_order_id)
+      if (position.sl_order_id) await cancelOrderUnified(position.symbol, position.sl_order_id)
       return true
     }
   }
@@ -250,12 +287,10 @@ function hasOpenPosition(symbol) {
 async function runBot() {
   try {
     console.log('\n─────────────────────────────────────────')
-    console.log(`[${new Date().toISOString()}] Tick ${CONFIG.symbol}`)
+    console.log(`[${new Date().toISOString()}] Tick ${CONFIG.symbol} (${EXCHANGE_NAME})`)
 
-    // 1. Circuit breaker
     if (isCircuitBreakerActive(CONFIG.symbol)) return
 
-    // 2. Cek posisi aktif
     const openPos = hasOpenPosition(CONFIG.symbol)
     if (openPos) {
       console.log(`[POS] Open: entry=${openPos.entry_price}, SL=${openPos.sl_price}, TP=${openPos.tp_price}`)
@@ -267,16 +302,12 @@ async function runBot() {
       if (isCircuitBreakerActive(CONFIG.symbol)) return
     }
 
-    // 3. Ambil data market
-    // Butuh minimal bbPeriod + 2 candle untuk kalkulasi BB yang valid
     const candleLimit = CONFIG.bbPeriod + 50
     const candles     = await exchange.fetchOHLCV(CONFIG.symbol, CONFIG.timeframe, undefined, candleLimit)
     const closes      = candles.map(c => c[4])
 
-    // 4. Hitung indikator
     const rsiArr = RSI.calculate({ values: closes, period: CONFIG.rsiPeriod })
 
-    // Hitung BB untuk setiap candle secara sliding window
     const bbArr = []
     for (let i = CONFIG.bbPeriod - 1; i < closes.length; i++) {
       const slice = closes.slice(i - CONFIG.bbPeriod + 1, i + 1)
@@ -299,16 +330,13 @@ async function runBot() {
 
     console.log(`[DATA] Price=${currPrice.toFixed(2)} | RSI=${currRSI.toFixed(2)} | BB Lower=${currBB.lower.toFixed(2)} | BB Mid=${currBB.middle.toFixed(2)} | USDT=$${usdt.toFixed(2)}`)
 
-    // 5. Cek sinyal
     const signal = getSignal({ closes, rsiArr, bbArr })
     console.log(`[SIGNAL] ${signal}`)
     if (signal !== 'BUY') return
 
-    // 6. Hitung size & SL/TP
     const size       = getPositionSize(usdt, currPrice)
     const { sl, tp } = calcSLTP(currPrice, currBB.middle)
 
-    // Validasi: TP harus di atas entry (jangan entry kalau MA20 di bawah harga)
     if (tp <= currPrice) {
       console.log(`[SKIP] TP (MA20=${tp.toFixed(2)}) <= entry price — sinyal tidak valid`)
       return
@@ -316,14 +344,11 @@ async function runBot() {
 
     console.log(`[ORDER] Entry=${currPrice.toFixed(2)}, SL=${sl.toFixed(2)}, TP=${tp.toFixed(2)}`)
 
-    // 7. Entry
     const buyOrder   = await placeBuy(CONFIG.symbol, size)
     const entryPrice = buyOrder.average ?? currPrice
 
-    // Tunggu balance settle
     await new Promise(r => setTimeout(r, 2000))
 
-    // 8. Pasang SL & TP
     let slOrderId = null
     let tpOrderId = null
 
@@ -341,7 +366,6 @@ async function runBot() {
       console.warn('[WARN] Gagal pasang TP:', e.message)
     }
 
-    // 9. Simpan ke DB
     const posId = stmtInsert.run({
       symbol:      CONFIG.symbol,
       side:        'buy',
@@ -361,7 +385,7 @@ async function runBot() {
 }
 
 // ─── START ────────────────────────────────────────────────────────────────────
-console.log('=== OKX Bot Started ===')
+console.log(`=== Bot Started (${EXCHANGE_NAME.toUpperCase()}) ===`)
 console.log(`Symbol    : ${CONFIG.symbol}`)
 console.log(`Timeframe : ${CONFIG.timeframe}`)
 console.log(`Max Modal : $${CONFIG.maxPositionUSDT} per trade`)
@@ -373,4 +397,4 @@ console.log(`CB        : stop setelah SL ${CONFIG.circuitBreaker.maxSLPerDay}x h
 console.log(`Interval  : 5 menit`)
 
 runBot()
-setInterval(runBot, 5 * 60 * 1000) // cek setiap 5 menit
+setInterval(runBot, 5 * 60 * 1000)
