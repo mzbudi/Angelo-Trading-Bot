@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Angelo Trading Bot — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0E1116;
+    --surface:   #161B22;
+    --surface-2: #1C2128;
+    --border:    #2A313C;
+    --text:      #E6EDF3;
+    --text-mute: #8B949E;
+    --win:       #3FB950;
+    --win-dim:   #1B4721;
+    --loss:      #F85149;
+    --loss-dim:  #4C1815;
+    --warn:      #D29922;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--win);
+    box-shadow: 0 0 0 0 rgba(63,185,80,0.5);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(63,185,80,0.45); }
+    70%  { box-shadow: 0 0 0 6px rgba(63,185,80,0); }
+    100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); }
+  }
+  .brand h1 {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 0;
+  }
+  .brand span { color: var(--text-mute); font-size: 12px; }
+
+  .tabs {
+    display: flex;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .tab {
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 7px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-mute);
+    transition: all 0.15s ease;
+    user-select: none;
+  }
+  .tab.active { background: var(--surface-2); color: var(--text); }
+
+  main { max-width: 880px; margin: 0 auto; padding: 28px 24px 60px; }
+
+  /* ─── Status strip ─────────────────────────────────────────────── */
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .strip .cell { background: var(--surface); padding: 16px 18px; }
+  .strip .label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-mute); margin-bottom: 6px;
+  }
+  .strip .value {
+    font-family: var(--mono); font-size: 22px; font-weight: 600;
+    line-height: 1;
+  }
+  .value.pos { color: var(--win); }
+  .value.neg { color: var(--loss); }
+  .value.warn { color: var(--warn); }
+
+  @media (max-width: 640px) {
+    .strip { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* ─── Circuit breaker pips ─────────────────────────────────────── */
+  .pips { display: flex; gap: 4px; margin-top: 8px; }
+  .pip { width: 16px; height: 5px; border-radius: 3px; background: var(--border); }
+  .pip.filled { background: var(--loss); }
+  .pip.filled.last { background: var(--warn); }
+
+  /* ─── Open position card ───────────────────────────────────────── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 24px;
+  }
+  .card h2 {
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-mute); margin: 0 0 14px;
+  }
+  .open-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  .open-grid div .k { font-size: 11px; color: var(--text-mute); margin-bottom: 3px; }
+  .open-grid div .v { font-family: var(--mono); font-size: 16px; }
+  .empty {
+    color: var(--text-mute); font-size: 14px; font-family: var(--sans);
+  }
+
+  /* ─── 7 hari mini bar ──────────────────────────────────────────── */
+  .week-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    height: 90px;
+    margin-top: 4px;
+  }
+  .week-bar { flex: 1; display: flex; flex-direction: column-reverse; gap: 2px; }
+  .week-bar .seg { border-radius: 2px; min-height: 3px; }
+  .week-bar .seg.tp { background: var(--win); }
+  .week-bar .seg.sl { background: var(--loss); }
+  .week-labels { display: flex; gap: 8px; margin-top: 8px; }
+  .week-labels span {
+    flex: 1; text-align: center; font-size: 10px; color: var(--text-mute);
+    font-family: var(--mono);
+  }
+
+  /* ─── Tabel riwayat ─────────────────────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+  thead th {
+    text-align: left; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--text-mute); font-weight: 500;
+    padding: 0 10px 10px; border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 10px 10px; border-bottom: 1px solid var(--border); }
+  tbody tr:last-child td { border-bottom: none; }
+  .wick { display: inline-block; width: 14px; text-align: center; }
+  .wick.tp { color: var(--win); }
+  .wick.sl { color: var(--loss); }
+  .pnl.pos { color: var(--win); }
+  .pnl.neg { color: var(--loss); }
+  .muted { color: var(--text-mute); }
+
+  footer {
+    text-align: center; padding: 24px;
+    font-size: 12px; color: var(--text-mute); font-family: var(--mono);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>ANGELO TRADING BOT</h1>
+    <span id="lastUpdate">memuat…</span>
+  </div>
+  <div class="tabs">
+    <div class="tab active" data-exchange="okx">OKX</div>
+    <div class="tab" data-exchange="toko">TOKOCRYPTO</div>
+  </div>
+</header>
+
+<main>
+
+  <div class="strip">
+    <div class="cell">
+      <div class="label">Winrate</div>
+      <div class="value" id="winrate">—</div>
+    </div>
+    <div class="cell">
+      <div class="label">Total P&amp;L (est.)</div>
+      <div class="value" id="totalPnl">—</div>
+    </div>
+    <div class="cell">
+      <div class="label">Total Trade</div>
+      <div class="value" id="totalTrades">—</div>
+    </div>
+    <div class="cell">
+      <div class="label">Circuit Breaker</div>
+      <div class="value" id="cbStatus">—</div>
+      <div class="pips" id="cbPips"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Posisi Terbuka</h2>
+    <div id="openPositionBody"><div class="empty">Memuat…</div></div>
+  </div>
+
+  <div class="card">
+    <h2>7 Hari Terakhir</h2>
+    <div class="week-bars" id="weekBars"></div>
+    <div class="week-labels" id="weekLabels"></div>
+  </div>
+
+  <div class="card">
+    <h2>Riwayat Trade</h2>
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>Dibuka</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>P&amp;L</th>
+        </tr>
+      </thead>
+      <tbody id="recentBody">
+        <tr><td colspan="5" class="muted">Memuat…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>auto-refresh setiap 15 detik</footer>
+
+<script>
+let currentExchange = 'okx'
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'))
+    tab.classList.add('active')
+    currentExchange = tab.dataset.exchange
+    loadStats()
+  })
+})
+
+function fmtUsd(n) {
+  const sign = n >= 0 ? '+' : ''
+  return `${sign}$${n.toFixed(2)}`
+}
+
+function fmtPrice(n) {
+  return Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 })
+}
+
+async function loadStats() {
+  try {
+    const res  = await fetch(`/api/stats?exchange=${currentExchange}`)
+    const data = await res.json()
+    render(data)
+    document.getElementById('lastUpdate').textContent =
+      'update ' + new Date().toLocaleTimeString('id-ID')
+  } catch (e) {
+    document.getElementById('lastUpdate').textContent = 'gagal memuat data'
+  }
+}
+
+function render(d) {
+  // Status strip
+  document.getElementById('winrate').textContent =
+    d.winrate === null ? '—' : d.winrate.toFixed(1) + '%'
+
+  const pnlEl = document.getElementById('totalPnl')
+  pnlEl.textContent = fmtUsd(d.totalPnl)
+  pnlEl.className = 'value ' + (d.totalPnl >= 0 ? 'pos' : 'neg')
+
+  document.getElementById('totalTrades').textContent = d.totalTrades
+
+  const cbEl = document.getElementById('cbStatus')
+  cbEl.textContent = d.circuitActive ? 'AKTIF' : 'NORMAL'
+  cbEl.className = 'value ' + (d.circuitActive ? 'neg' : 'pos')
+
+  const pipsEl = document.getElementById('cbPips')
+  pipsEl.innerHTML = ''
+  for (let i = 0; i < d.maxSLPerDay; i++) {
+    const pip = document.createElement('div')
+    const filled = i < d.slToday
+    pip.className = 'pip' + (filled ? ' filled' : '') + (filled && i === d.slToday - 1 ? ' last' : '')
+    pipsEl.appendChild(pip)
+  }
+
+  // Open position
+  const openBody = document.getElementById('openPositionBody')
+  if (d.openPositions.length === 0) {
+    openBody.innerHTML = '<div class="empty">Tidak ada posisi terbuka. Bot menunggu sinyal selanjutnya.</div>'
+  } else {
+    openBody.innerHTML = d.openPositions.map(p => `
+      <div class="open-grid">
+        <div><div class="k">Entry</div><div class="v">${fmtPrice(p.entry_price)}</div></div>
+        <div><div class="k">Stop Loss</div><div class="v" style="color:var(--loss)">${fmtPrice(p.sl_price)}</div></div>
+        <div><div class="k">Take Profit</div><div class="v" style="color:var(--win)">${fmtPrice(p.tp_price)}</div></div>
+      </div>
+    `).join('')
+  }
+
+  // 7 hari bar
+  const maxTotal = Math.max(1, ...d.byDay.map(x => x.total))
+  const barsEl   = document.getElementById('weekBars')
+  const labelsEl = document.getElementById('weekLabels')
+
+  if (d.byDay.length === 0) {
+    barsEl.innerHTML = '<div class="empty">Belum ada riwayat trade.</div>'
+    labelsEl.innerHTML = ''
+  } else {
+    barsEl.innerHTML = d.byDay.map(day => {
+      const tpH = (day.tp / maxTotal) * 100
+      const slH = (day.sl / maxTotal) * 100
+      return `
+        <div class="week-bar">
+          ${day.sl > 0 ? `<div class="seg sl" style="height:${slH}%"></div>` : ''}
+          ${day.tp > 0 ? `<div class="seg tp" style="height:${tpH}%"></div>` : ''}
+        </div>
+      `
+    }).join('')
+    labelsEl.innerHTML = d.byDay.map(day => {
+      const dt = new Date(day.hari)
+      return `<span>${dt.getDate()}/${dt.getMonth()+1}</span>`
+    }).join('')
+  }
+
+  // Riwayat trade
+  const recentBody = document.getElementById('recentBody')
+  if (d.recent.length === 0) {
+    recentBody.innerHTML = '<tr><td colspan="5" class="muted">Belum ada posisi yang ditutup. Begitu SL atau TP kena, riwayatnya muncul di sini.</td></tr>'
+  } else {
+    recentBody.innerHTML = d.recent.map(p => {
+      const isWin = p.closed_reason === 'tp'
+      const exitPrice = isWin ? p.tp_price : p.sl_price
+      const opened = new Date(p.opened_at)
+      return `
+        <tr>
+          <td><span class="wick ${isWin ? 'tp' : 'sl'}">${isWin ? '▲' : '▼'}</span></td>
+          <td class="muted">${opened.toLocaleDateString('id-ID')} ${opened.toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'})}</td>
+          <td>${fmtPrice(p.entry_price)}</td>
+          <td>${fmtPrice(exitPrice)}</td>
+          <td class="pnl ${p.pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(p.pnl)}</td>
+        </tr>
+      `
+    }).join('')
+  }
+}
+
+loadStats()
+setInterval(loadStats, 15000)
+</script>
+
+</body>
+</html>
