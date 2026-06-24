@@ -6,9 +6,9 @@ const Database             = require('better-sqlite3')
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
 const CONFIG = {
-  exchange:  'tokocrypto',          // 'okx' atau 'tokocrypto' — tinggal ganti ini
+  exchange:  'okx',          // 'okx' atau 'tokocrypto' — tinggal ganti ini
 
-  symbol:    'ETH/USDT',
+  symbol:    'SOL/USDT',
   timeframe: '15m',          // ganti ke '1h', '4h' dll tanpa ubah logic
 
   maxPositionUSDT: 200,      // modal per trade (hard cap)
