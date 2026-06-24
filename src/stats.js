@@ -49,7 +49,7 @@ console.log(`  SL (loss)        : ${sl.length}`)
 console.log(`  Winrate          : ${winrate}%`)
 console.log(`  Est. Total P&L   : $${totalPnl.toFixed(2)}`)
 console.log(`  Open sekarang    : ${open.length}`)
-console.log(`  SL hari ini      : ${slToday} / ${db.prepare("SELECT json_extract(value,'$.maxSLPerDay') FROM config WHERE key='circuitBreaker' LIMIT 1").pluck().get() ?? '2'}`)
+console.log(`  SL hari ini      : ${slToday} / 2`)
 console.log('────────────────────────────────────────')
 
 // ─── RIWAYAT 10 TERAKHIR ──────────────────────────────────────────────────────
