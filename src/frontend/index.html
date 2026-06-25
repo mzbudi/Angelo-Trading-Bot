@@ -215,8 +215,25 @@
     <div class="cell">
       <div class="label">Circuit Breaker</div>
       <div class="value" id="cbStatus">—</div>
-      <div class="pips" id="cbPips"></div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Per Pair</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Pair</th>
+          <th>Trade</th>
+          <th>Winrate</th>
+          <th>P&amp;L</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="byPairBody">
+        <tr><td colspan="5" class="muted">Memuat…</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="card">
@@ -236,6 +253,7 @@
       <thead>
         <tr>
           <th></th>
+          <th>Pair</th>
           <th>Dibuka</th>
           <th>Entry</th>
           <th>Exit</th>
@@ -243,7 +261,7 @@
         </tr>
       </thead>
       <tbody id="recentBody">
-        <tr><td colspan="5" class="muted">Memuat…</td></tr>
+        <tr><td colspan="6" class="muted">Memuat…</td></tr>
       </tbody>
     </table>
   </div>
@@ -297,16 +315,23 @@ function render(d) {
   document.getElementById('totalTrades').textContent = d.totalTrades
 
   const cbEl = document.getElementById('cbStatus')
-  cbEl.textContent = d.circuitActive ? 'AKTIF' : 'NORMAL'
-  cbEl.className = 'value ' + (d.circuitActive ? 'neg' : 'pos')
+  cbEl.textContent = d.totalPairs === 0 ? '—' : `${d.pairsPaused}/${d.totalPairs} paused`
+  cbEl.className = 'value ' + (d.pairsPaused > 0 ? 'neg' : 'pos')
 
-  const pipsEl = document.getElementById('cbPips')
-  pipsEl.innerHTML = ''
-  for (let i = 0; i < d.maxSLPerDay; i++) {
-    const pip = document.createElement('div')
-    const filled = i < d.slToday
-    pip.className = 'pip' + (filled ? ' filled' : '') + (filled && i === d.slToday - 1 ? ' last' : '')
-    pipsEl.appendChild(pip)
+  // Per Pair breakdown
+  const byPairBody = document.getElementById('byPairBody')
+  if (!d.byPair || d.byPair.length === 0) {
+    byPairBody.innerHTML = '<tr><td colspan="5" class="muted">Belum ada riwayat trade.</td></tr>'
+  } else {
+    byPairBody.innerHTML = d.byPair.map(s => `
+      <tr>
+        <td>${s.symbol}</td>
+        <td>${s.total}</td>
+        <td>${s.winrate === null ? '—' : s.winrate.toFixed(1) + '%'}</td>
+        <td class="pnl ${s.pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(s.pnl)}</td>
+        <td class="${s.circuitActive ? 'neg' : 'muted'}">${s.circuitActive ? `PAUSED (${s.slToday} SL)` : 'normal'}</td>
+      </tr>
+    `).join('')
   }
 
   // Open position
@@ -315,10 +340,13 @@ function render(d) {
     openBody.innerHTML = '<div class="empty">Tidak ada posisi terbuka. Bot menunggu sinyal selanjutnya.</div>'
   } else {
     openBody.innerHTML = d.openPositions.map(p => `
-      <div class="open-grid">
-        <div><div class="k">Entry</div><div class="v">${fmtPrice(p.entry_price)}</div></div>
-        <div><div class="k">Stop Loss</div><div class="v" style="color:var(--loss)">${fmtPrice(p.sl_price)}</div></div>
-        <div><div class="k">Take Profit</div><div class="v" style="color:var(--win)">${fmtPrice(p.tp_price)}</div></div>
+      <div style="margin-bottom:14px;">
+        <div style="font-family:var(--mono);font-size:13px;color:var(--text-mute);margin-bottom:8px;">${p.symbol}</div>
+        <div class="open-grid">
+          <div><div class="k">Entry</div><div class="v">${fmtPrice(p.entry_price)}</div></div>
+          <div><div class="k">Stop Loss</div><div class="v" style="color:var(--loss)">${fmtPrice(p.sl_price)}</div></div>
+          <div><div class="k">Take Profit</div><div class="v" style="color:var(--win)">${fmtPrice(p.tp_price)}</div></div>
+        </div>
       </div>
     `).join('')
   }
@@ -351,7 +379,7 @@ function render(d) {
   // Riwayat trade
   const recentBody = document.getElementById('recentBody')
   if (d.recent.length === 0) {
-    recentBody.innerHTML = '<tr><td colspan="5" class="muted">Belum ada posisi yang ditutup. Begitu SL atau TP kena, riwayatnya muncul di sini.</td></tr>'
+    recentBody.innerHTML = '<tr><td colspan="6" class="muted">Belum ada posisi yang ditutup. Begitu SL atau TP kena, riwayatnya muncul di sini.</td></tr>'
   } else {
     recentBody.innerHTML = d.recent.map(p => {
       const isWin = p.closed_reason === 'tp'
@@ -360,6 +388,7 @@ function render(d) {
       return `
         <tr>
           <td><span class="wick ${isWin ? 'tp' : 'sl'}">${isWin ? '▲' : '▼'}</span></td>
+          <td class="muted">${p.symbol}</td>
           <td class="muted">${opened.toLocaleDateString('id-ID')} ${opened.toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'})}</td>
           <td>${fmtPrice(p.entry_price)}</td>
           <td>${fmtPrice(exitPrice)}</td>

@@ -90,11 +90,38 @@ function computeStats(exchangeKey) {
   const totalPnl = closed.reduce((acc, p) => acc + pnl(p), 0)
   const winrate  = closed.length ? (tp.length / closed.length) * 100 : null
 
-  const slToday = db.prepare(`
-    SELECT COUNT(*) as count FROM positions
+  // SL hari ini PER-PAIR — circuit breaker bot juga per-pair, jadi dashboard
+  // harus breakdown per symbol, bukan digabung semua pair jadi satu angka.
+  const slTodayRows = db.prepare(`
+    SELECT symbol, COUNT(*) as count FROM positions
     WHERE status = 'closed' AND closed_reason = 'sl'
       AND DATE(closed_at) = DATE('now')
-  `).get().count
+    GROUP BY symbol
+  `).all()
+  const slTodayMap = {}
+  slTodayRows.forEach(r => { slTodayMap[r.symbol] = r.count })
+
+  // Breakdown per pair — trade, winrate, P&L, dan status circuit breaker masing-masing
+  const symbolSet = new Set(all.map(p => p.symbol))
+  const byPair = Array.from(symbolSet).sort().map(symbol => {
+    const symClosed   = closed.filter(p => p.symbol === symbol)
+    const symTp       = symClosed.filter(p => p.closed_reason === 'tp')
+    const symSl       = symClosed.filter(p => p.closed_reason === 'sl')
+    const symPnl      = symClosed.reduce((acc, p) => acc + pnl(p), 0)
+    const symSlToday  = slTodayMap[symbol] || 0
+    return {
+      symbol,
+      total:         symClosed.length,
+      tp:            symTp.length,
+      sl:            symSl.length,
+      winrate:       symClosed.length ? (symTp.length / symClosed.length) * 100 : null,
+      pnl:           symPnl,
+      slToday:       symSlToday,
+      circuitActive: symSlToday >= MAX_SL_PER_DAY,
+    }
+  })
+
+  const pairsPaused = byPair.filter(p => p.circuitActive).length
 
   const byDay = db.prepare(`
     SELECT
@@ -119,9 +146,9 @@ function computeStats(exchangeKey) {
     winrate,
     totalPnl,
     openPositions: open,
-    slToday,
-    maxSLPerDay:   MAX_SL_PER_DAY,
-    circuitActive: slToday >= MAX_SL_PER_DAY,
+    pairsPaused,
+    totalPairs:    byPair.length,
+    byPair,
     byDay,
     recent,
   }
